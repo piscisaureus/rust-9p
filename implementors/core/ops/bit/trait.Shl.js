@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["rs9p"] = [{"text":"impl&lt;'a, T:&nbsp;Encodable, W:&nbsp;WriteBytesExt&gt; Shl&lt;&amp;'a T&gt; for Encoder&lt;W&gt;","synthetic":false,"types":[]},{"text":"impl&lt;'a, T:&nbsp;Encodable, W:&nbsp;WriteBytesExt&gt; Shl&lt;&amp;'a T&gt; for SResult&lt;Encoder&lt;W&gt;&gt;","synthetic":false,"types":[]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

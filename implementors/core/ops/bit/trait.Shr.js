@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["rs9p"] = [{"text":"impl&lt;'a, T:&nbsp;Decodable, R:&nbsp;ReadBytesExt&gt; Shr&lt;&amp;'a mut T&gt; for Decoder&lt;R&gt;","synthetic":false,"types":[]},{"text":"impl&lt;'a, T:&nbsp;Decodable, R:&nbsp;ReadBytesExt&gt; Shr&lt;&amp;'a mut T&gt; for SResult&lt;Decoder&lt;R&gt;&gt;","synthetic":false,"types":[]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
