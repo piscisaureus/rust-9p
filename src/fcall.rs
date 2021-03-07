@@ -4,17 +4,21 @@
 //! 9P2000.L
 
 use std::fs;
-use std::mem::{size_of, size_of_val};
 use std::os::unix::fs::MetadataExt;
 
 use bitflags::bitflags;
 use enum_primitive::*;
+
+use crate::serialize::{DummyWriter, Encodable, Encoder};
 
 /// 9P2000 version string
 pub const P92000: &str = "9P2000";
 
 /// 9P2000.L version string
 pub const P92000L: &str = "9P2000.L";
+
+/// 9P2000.L version string
+pub const P92000W: &str = "9P2000.W";
 
 /*
  * 9P magic numbers
@@ -430,38 +434,49 @@ pub struct DirEntry {
     /// Directory name
     pub name: String,
 }
-
-impl DirEntry {
-    pub fn size(&self) -> u32 {
-        (size_of_val(&self.qid)
-            + size_of_val(&self.offset)
-            + size_of_val(&self.typ)
-            + size_of::<u16>()
-            + self.name.len()) as u32
-    }
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DirEntryStat {
+    pub dir_entry: DirEntry,
+    pub stat: Stat,
 }
 
 /// Directory entry array
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DirEntryData {
-    pub data: Vec<DirEntry>,
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DirData<E> {
+    entries: Vec<E>,
+    // Total size in bytes (when decoding), or maximum size (when encoding),
+    // of all entries that will be held in this struct.
+    target_count: usize,
+    // Actual size, in bytes, of all entries that have been pushed so far.
+    current_count: usize,
 }
 
-impl DirEntryData {
-    pub fn new() -> DirEntryData {
-        Self::with(Vec::new())
+impl<E: Encodable> DirData<E> {
+    pub fn new(target_count: u32) -> Self {
+        Self {
+            target_count: target_count as usize,
+            current_count: 0,
+            entries: Vec::new(),
+        }
     }
-    pub fn with(v: Vec<DirEntry>) -> DirEntryData {
-        DirEntryData { data: v }
+
+    pub fn push(&mut self, entry: E) -> Result<(), ()> {
+        let size = Encoder::new(DummyWriter).encode(&entry).unwrap();
+        if self.current_count + size <= self.target_count {
+            self.current_count += size;
+            self.entries.push(entry);
+            Ok(())
+        } else {
+            Err(())
+        }
     }
-    pub fn data(&self) -> &[DirEntry] {
-        &self.data
+
+    pub fn count(&self) -> u32 {
+        self.current_count as u32
     }
-    pub fn size(&self) -> u32 {
-        self.data.iter().fold(0, |a, e| a + e.size()) as u32
-    }
-    pub fn push(&mut self, entry: DirEntry) {
-        self.data.push(entry);
+
+    pub fn entries(&self) -> &[E] {
+        &self.entries
     }
 }
 
@@ -575,6 +590,12 @@ enum_from_primitive! {
         //Rstat,
         //Twstat          = 126,
         //Rwstat,
+
+        // 9P2000.W
+        Tclose          = 128,
+        Rclose,
+        Treaddirstat    = 130,
+        Rreaddirstat
     }
 }
 
@@ -591,7 +612,7 @@ impl MsgType {
             Rlerror | Rstatfs | Rlopen | Rlcreate | Rsymlink | Rmknod | Rrename | Rreadlink
             | Rgetattr | Rsetattr | Rxattrwalk | Rxattrcreate | Rreaddir | Rfsync | Rlock
             | Rgetlock | Rlink | Rmkdir | Rrenameat | Runlinkat | Rversion | Rauth | Rattach
-            | Rflush | Rwalk | Rread | Rwrite | Rclunk | Rremove => true,
+            | Rflush | Rwalk | Rread | Rwrite | Rclunk | Rremove | Rreaddirstat | Rclose => true,
             _ => false,
         }
     }
@@ -657,6 +678,10 @@ impl<'a> From<&'a Fcall> for MsgType {
             Fcall::Rclunk => MsgType::Rclunk,
             Fcall::Tremove { .. } => MsgType::Tremove,
             Fcall::Rremove => MsgType::Rremove,
+            Fcall::Tclose { .. } => MsgType::Tclose,
+            Fcall::Rclose { .. } => MsgType::Rclose,
+            Fcall::Treaddirstat { .. } => MsgType::Treaddirstat,
+            Fcall::Rreaddirstat { .. } => MsgType::Rreaddirstat,
         }
     }
 }
@@ -762,7 +787,7 @@ pub enum Fcall {
         count: u32,
     },
     Rreaddir {
-        data: DirEntryData,
+        dir_data: DirData<DirEntry>,
     },
     Tfsync {
         fid: u32,
@@ -877,6 +902,7 @@ pub enum Fcall {
         fid: u32,
     },
     Rremove,
+
     // 9P2000 operations not used for 9P2000.L
     //Tauth { afid: u32, uname: String, aname: String },
     //Rauth { aqid: Qid },
@@ -891,6 +917,21 @@ pub enum Fcall {
     //Rstat { stat: Stat },
     //Twstat { fid: u32, stat: Stat },
     //Rwstat,
+
+    // 9P2000.W
+    Tclose {
+        fid: u32,
+        flags: u32,
+    },
+    Rclose,
+    Treaddirstat {
+        fid: u32,
+        offset: u64,
+        count: u32,
+    },
+    Rreaddirstat {
+        dir_data: DirData<DirEntryStat>,
+    },
 }
 
 impl Fcall {
@@ -926,6 +967,8 @@ impl Fcall {
             Fcall::Twrite { fid, .. } => vec![fid],
             Fcall::Tclunk { fid, .. } => vec![fid],
             Fcall::Tremove { fid } => vec![fid],
+            Fcall::Treaddirstat { fid, .. } => vec![fid],
+            Fcall::Tclose { fid, .. } => vec![fid],
             _ => Vec::new(),
         }
     }

@@ -3,7 +3,7 @@
 use crate::fcall::*;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use num_traits::FromPrimitive;
-use std::io::{Read, Result};
+use std::io::{Read, Result, Write};
 use std::mem;
 use std::ops::{Shl, Shr};
 
@@ -30,6 +30,20 @@ fn create_buffer(size: usize) -> Vec<u8> {
 fn read_exact<R: Read + ?Sized>(r: &mut R, size: usize) -> Result<Vec<u8>> {
     let mut buf = create_buffer(size);
     r.read_exact(&mut buf[..]).and(Ok(buf))
+}
+
+/// A `Writer` that doesn't actually store any data. It can be used to make
+// `Encoder` count the number of bytes needed to encode a particular value.
+pub struct DummyWriter;
+
+impl Write for DummyWriter {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A serializing specific result to overload operators on `Result`
@@ -268,12 +282,21 @@ impl Encodable for DirEntry {
     }
 }
 
-impl Encodable for DirEntryData {
+impl Encodable for DirEntryStat {
+    fn encode<W: WriteBytesExt>(&self, w: &mut W) -> Result<usize> {
+        match Encoder::new(w) << &self.dir_entry << &self.stat {
+            SResult(Ok(enc)) => Ok(enc.bytes_written()),
+            SResult(Err(e)) => Err(e),
+        }
+    }
+}
+
+impl<E: Encodable> Encodable for DirData<E> {
     fn encode<W: WriteBytesExt>(&self, w: &mut W) -> Result<usize> {
         match self
-            .data()
+            .entries()
             .iter()
-            .fold(Encoder::new(w) << &self.size(), |acc, e| acc << e)
+            .fold(Encoder::new(w) << &self.count(), |acc, e| acc << e)
         {
             SResult(Ok(enc)) => Ok(enc.bytes_written()),
             SResult(Err(e)) => Err(e),
@@ -418,7 +441,7 @@ impl Encodable for Msg {
                 ref offset,
                 ref count,
             } => buf << fid << offset << count,
-            Rreaddir { ref data } => buf << data,
+            Rreaddir { dir_data: ref data } => buf << data,
             Tfsync { ref fid } => buf << fid,
             Rfsync => buf,
             Tlock { ref fid, ref flock } => buf << fid << flock,
@@ -506,6 +529,18 @@ impl Encodable for Msg {
             Rclunk => buf,
             Tremove { ref fid } => buf << fid,
             Rremove => buf,
+
+            /*
+             * 9P2000.W
+             */
+            Tclose { ref fid, ref flags } => buf << fid << flags,
+            Rclose => buf,
+            Treaddirstat {
+                ref fid,
+                ref offset,
+                ref count,
+            } => buf << fid << offset << count,
+            Rreaddirstat { dir_data: ref data } => buf << data,
         };
 
         match buf {
@@ -620,7 +655,7 @@ impl Decodable for SetAttr {
 
 impl Decodable for DirEntry {
     fn decode<R: ReadBytesExt>(r: &mut R) -> Result<Self> {
-        Ok(DirEntry {
+        Ok(Self {
             qid: Decodable::decode(r)?,
             offset: Decodable::decode(r)?,
             typ: Decodable::decode(r)?,
@@ -629,14 +664,26 @@ impl Decodable for DirEntry {
     }
 }
 
-impl Decodable for DirEntryData {
+impl Decodable for DirEntryStat {
     fn decode<R: ReadBytesExt>(r: &mut R) -> Result<Self> {
-        let count: u32 = Decodable::decode(r)?;
-        let mut data: Vec<DirEntry> = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            data.push(Decodable::decode(r)?);
+        Ok(Self {
+            dir_entry: Decodable::decode(r)?,
+            stat: Decodable::decode(r)?,
+        })
+    }
+}
+
+impl<E: Decodable + Encodable> Decodable for DirData<E> {
+    fn decode<R: ReadBytesExt>(r: &mut R) -> Result<Self> {
+        let expected_count: u32 = Decodable::decode(r)?;
+        let mut dir_data = DirData::new(expected_count);
+        while dir_data.count() > 0 {
+            let entry = Decodable::decode(r)?;
+            dir_data
+                .push(entry)
+                .map_err(|_| io_err!(InvalidData, "RREADDIR size mismatch"))?;
         }
-        Ok(DirEntryData::with(data))
+        Ok(dir_data)
     }
 }
 
@@ -689,7 +736,8 @@ impl Decodable for Msg {
 
         let mut buf = r;
 
-        let msg_type = MsgType::from_u8(decode!(buf));
+        let msg_type_u8: u8 = decode!(buf);
+        let msg_type = MsgType::from_u8(msg_type_u8);
         let tag = decode!(buf);
         let body = match msg_type {
             /*
@@ -785,7 +833,9 @@ impl Decodable for Msg {
                 offset: decode!(buf),
                 count: decode!(buf),
             },
-            Some(Rreaddir) => Fcall::Rreaddir { data: decode!(buf) },
+            Some(Rreaddir) => Fcall::Rreaddir {
+                dir_data: decode!(buf),
+            },
             Some(Tfsync) => Fcall::Tfsync { fid: decode!(buf) },
             Some(Rfsync) => Fcall::Rfsync,
             Some(Tlock) => Fcall::Tlock {
@@ -889,7 +939,37 @@ impl Decodable for Msg {
             Some(Rclunk) => Fcall::Rclunk,
             Some(Tremove) => Fcall::Tremove { fid: decode!(buf) },
             Some(Rremove) => Fcall::Rremove,
-            Some(Tlerror) | None => return res!(io_err!(Other, "Invalid message type")),
+
+            // 9P2000.W
+            Some(Tclose) => Fcall::Tclose {
+                fid: decode!(buf),
+                flags: decode!(buf),
+            },
+            Some(Rclose) => Fcall::Rclose,
+            Some(Treaddirstat) => Fcall::Treaddirstat {
+                fid: decode!(buf),
+                offset: decode!(buf),
+                count: decode!(buf),
+            },
+            Some(Rreaddirstat) => Fcall::Rreaddirstat {
+                dir_data: decode!(buf),
+            },
+
+            Some(Tlerror) | None => {
+                let mut v = Vec::<u8>::new();
+                let mut s = String::new();
+                while let Ok(u) = buf.read_u8() {
+                    v.push(u);
+                    s.push(char::from(u));
+                }
+                let msg = format!(
+                    "Invalid message. type = {}, tag = {}\n\
+                     .   buf as Vec<u8> = {:?}\n\
+                     .       as String  = {:?}",
+                    msg_type_u8, tag, v, s
+                );
+                return Err(io_err!(Other, msg));
+            }
         };
 
         Ok(Msg { tag, body })

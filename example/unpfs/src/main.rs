@@ -1,26 +1,27 @@
 use {
     async_trait::async_trait,
     filetime::FileTime,
+    futures::{pin_mut, prelude::*, stream::iter},
     nix::libc::{O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY},
     rs9p::{
         srv::{srv_async, Fid, Filesystem},
         *,
     },
     std::{
+        ffi::OsString,
         io::SeekFrom,
         os::unix::{fs::PermissionsExt, io::FromRawFd},
         path::PathBuf,
     },
     tokio::{
-        fs,
+        fs::{self, read_dir, symlink_metadata},
         prelude::*,
-        stream::StreamExt,
         sync::{Mutex, RwLock},
     },
 };
 
 mod utils;
-use crate::utils::*;
+use utils::*;
 
 // Some clients will incorrectly set bits in 9p flags that don't make sense.
 // For exmaple, the linux 9p kernel client propagates O_DIRECT to TCREATE and TOPEN
@@ -194,32 +195,88 @@ impl Filesystem for Unpfs {
     }
 
     async fn rreaddir(&self, fid: &Fid<Self::Fid>, off: u64, count: u32) -> Result<Fcall> {
-        let mut dirents = DirEntryData::new();
+        let mut dir_data = DirData::<DirEntry>::new(count);
 
+        // TODO: this logic looks incorrect.
         let offset = if off == 0 {
-            dirents.push(get_dirent_from(".", 0).await?);
-            dirents.push(get_dirent_from("..", 1).await?);
+            if !(dir_data.push(get_dirent_from(".", 0).await?).is_ok()
+                && dir_data.push(get_dirent_from("..", 1).await?).is_ok())
+            {
+                Err(io_err!(Other, "Rreaddir buffer too small"))?;
+            }
             off
         } else {
             off - 1
-        } as usize;
+        };
 
         let mut entries = {
             let realpath = fid.aux.realpath.read().await;
-            fs::read_dir(&*realpath).await?.skip(offset)
+            fs::read_dir(&*realpath).await?.skip(offset as usize)
         };
 
         let mut i = offset;
         while let Some(entry) = entries.next().await {
-            let dirent = get_dirent(&entry?, 2 + i as u64).await?;
-            if dirents.size() + dirent.size() > count {
+            let dirent = get_dirent(&entry?, 2 + i).await?;
+            if let Err(()) = dir_data.push(dirent) {
                 break;
             }
-            dirents.push(dirent);
             i += 1;
         }
 
-        Ok(Fcall::Rreaddir { data: dirents })
+        Ok(Fcall::Rreaddir { dir_data })
+    }
+
+    async fn rreaddirstat(&self, fid: &Fid<Self::Fid>, offset: u64, count: u32) -> Result<Fcall> {
+        let path = fid.aux.realpath.read().await;
+
+        // Rust's `read_dir()` strips "." and ".." from the list of directory
+        // entries, but 9p expects them to be included.
+        //
+        // Iterating over `1..=2` to obtain `[".", ".."]` may seem odd, but
+        // there seems to be no way to placate the borrow checker while
+        // iterating over a slice of `&'static str`.
+        let entries1 = iter(1..=2).then(|num_dots| {
+            let name = OsString::from(".".repeat(num_dots));
+            let path = path.join(&name);
+            async move {
+                let metadata = symlink_metadata(path).await?;
+                Ok::<_, io::Error>((name, metadata))
+            }
+        });
+        let entries2 = read_dir(&*path).await?.and_then(|e| async move {
+            let name = e.file_name().to_owned();
+            let metadata = e.metadata().await?;
+            Ok((name, metadata))
+        });
+        let entries = entries1
+            .chain(entries2)
+            .enumerate()
+            .map(|(i, result)| async move {
+                // 9P expects the `offset` field to contain the *next* entry's offset.
+                let offset = 1 + i as u64;
+                let (name, metadata) = result?;
+                Ok::<_, io::Error>(DirEntryStat {
+                    dir_entry: DirEntry {
+                        qid: qid_from_attr(&metadata),
+                        offset,
+                        typ: 0,
+                        name: name.to_string_lossy().into(),
+                    },
+                    stat: metadata.into(),
+                })
+            })
+            .skip(offset as _)
+            .buffered(16);
+        pin_mut!(entries);
+
+        let mut dir_data = DirData::<DirEntryStat>::new(count);
+        while let Some(r) = entries.next().await {
+            if let Err(()) = dir_data.push(r?) {
+                break;
+            }
+        }
+
+        Ok(Fcall::Rreaddirstat { dir_data })
     }
 
     async fn rlopen(&self, fid: &Fid<Self::Fid>, flags: u32) -> Result<Fcall> {
@@ -346,6 +403,24 @@ impl Filesystem for Unpfs {
         Ok(Fcall::Rrenameat)
     }
 
+    async fn rrename(
+        &self,
+        oldfid: &Fid<Self::Fid>,
+        newdir: &Fid<Self::Fid>,
+        newname: &str,
+    ) -> Result<Fcall> {
+        let oldpath = &*oldfid.aux.realpath.read().await;
+
+        let newpath = {
+            let realpath = newdir.aux.realpath.read().await;
+            realpath.join(newname)
+        };
+
+        fs::rename(&oldpath, &newpath).await?;
+
+        Ok(Fcall::Rrename)
+    }
+
     async fn runlinkat(&self, dirfid: &Fid<Self::Fid>, name: &str, _flags: u32) -> Result<Fcall> {
         let path = {
             let realpath = dirfid.aux.realpath.read().await;
@@ -360,6 +435,17 @@ impl Filesystem for Unpfs {
         Ok(Fcall::Runlinkat)
     }
 
+    async fn rremove(&self, fid: &Fid<Self::Fid>) -> Result<Fcall> {
+        let path = &*fid.aux.realpath.read().await;
+
+        match fs::symlink_metadata(&path).await? {
+            ref attr if attr.is_dir() => fs::remove_dir(&path).await?,
+            _ => fs::remove_file(&path).await?,
+        };
+
+        Ok(Fcall::Rremove)
+    }
+
     async fn rfsync(&self, fid: &Fid<Self::Fid>) -> Result<Fcall> {
         {
             let mut file = fid.aux.file.lock().await;
@@ -369,7 +455,25 @@ impl Filesystem for Unpfs {
         Ok(Fcall::Rfsync)
     }
 
-    async fn rclunk(&self, _: &Fid<Self::Fid>) -> Result<Fcall> {
+    async fn rclose(&self, fid: &Fid<Self::Fid>, flags: u32) -> Result<Fcall> {
+        // I have no idea what possible `flags` are; this parameter seems to
+        // always have the samve value (8).
+        match flags {
+            8 => {
+                if let Some(mut file) = fid.aux.file.lock().await.take() {
+                    file.flush().await?;
+                }
+                // TODO: ensure that the path is no longer in use by other
+                // operations. The `realpath` field fets cloned here and there,
+                // so just locking it probably doesn't do the trick.
+                let _ = fid.aux.realpath.write().await;
+                Ok(Fcall::Rclose)
+            }
+            _ => Err(io_err!(InvalidInput, "Invalid close flags"))?,
+        }
+    }
+
+    async fn rclunk(&self, _fid: &Fid<Self::Fid>) -> Result<Fcall> {
         Ok(Fcall::Rclunk)
     }
 

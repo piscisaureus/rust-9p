@@ -249,8 +249,24 @@ pub trait Filesystem: Send {
                 msize,
                 version: ver.to_owned(),
             }),
+            P92000W => Ok(Fcall::Rversion {
+                msize,
+                version: ver.to_owned(),
+            }),
             _ => Err(error::Error::No(EPROTONOSUPPORT)),
         }
+    }
+
+    /*
+     * 9P2000.W
+     */
+    async fn rclose(&self, _: &Fid<Self::Fid>, _flags: u32) -> Result<Fcall> {
+        Err(error::Error::No(EOPNOTSUPP))
+    }
+
+    async fn rreaddirstat(&self, _: &Fid<Self::Fid>, _offset: u64, _count: u32) -> Result<Fcall> {
+        // TODO: add default implementation that uses `rreaddir` + `rgetattr`.
+        Err(error::Error::No(EOPNOTSUPP))
     }
 }
 
@@ -303,6 +319,8 @@ where
             Twrite { fid, ref offset, ref data }                                => fs.rwrite(get_fid(&fid)?, *offset, data),
             Tclunk { fid }                                                      => fs.rclunk(get_fid(&fid)?),
             Tremove { fid }                                                     => fs.rremove(get_fid(&fid)?),
+            Tclose { fid, ref flags }                                           => fs.rclose(get_fid(&fid)?, *flags),
+            Treaddirstat{fid, ref offset, ref count}                            => fs.rreaddirstat(get_fid(&fid)?, *offset, *count),
             _                                                                   => return Err(error::Error::No(EOPNOTSUPP)),
         };
 
