@@ -451,6 +451,9 @@ pub struct DirData<E> {
     current_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DirDataFull;
+
 impl<E: Encodable> DirData<E> {
     pub fn new(target_count: u32) -> Self {
         Self {
@@ -460,14 +463,14 @@ impl<E: Encodable> DirData<E> {
         }
     }
 
-    pub fn push(&mut self, entry: E) -> Result<(), ()> {
+    pub fn push(&mut self, entry: E) -> Result<(), DirDataFull> {
         let size = Encoder::new(DummyWriter).encode(&entry).unwrap();
         if self.current_count + size <= self.target_count {
             self.current_count += size;
             self.entries.push(entry);
             Ok(())
         } else {
-            Err(())
+            Err(DirDataFull)
         }
     }
 
@@ -608,13 +611,40 @@ impl MsgType {
     /// If the message type is R-message
     pub fn is_r(&self) -> bool {
         use crate::MsgType::*;
-        match *self {
-            Rlerror | Rstatfs | Rlopen | Rlcreate | Rsymlink | Rmknod | Rrename | Rreadlink
-            | Rgetattr | Rsetattr | Rxattrwalk | Rxattrcreate | Rreaddir | Rfsync | Rlock
-            | Rgetlock | Rlink | Rmkdir | Rrenameat | Runlinkat | Rversion | Rauth | Rattach
-            | Rflush | Rwalk | Rread | Rwrite | Rclunk | Rremove | Rreaddirstat | Rclose => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Rlerror
+                | Rstatfs
+                | Rlopen
+                | Rlcreate
+                | Rsymlink
+                | Rmknod
+                | Rrename
+                | Rreadlink
+                | Rgetattr
+                | Rsetattr
+                | Rxattrwalk
+                | Rxattrcreate
+                | Rreaddir
+                | Rfsync
+                | Rlock
+                | Rgetlock
+                | Rlink
+                | Rmkdir
+                | Rrenameat
+                | Runlinkat
+                | Rversion
+                | Rauth
+                | Rattach
+                | Rflush
+                | Rwalk
+                | Rread
+                | Rwrite
+                | Rclunk
+                | Rremove
+                | Rreaddirstat
+                | Rclose
+        )
     }
 }
 

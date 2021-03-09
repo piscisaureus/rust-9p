@@ -583,7 +583,7 @@ impl Decodable for String {
     fn decode<R: ReadBytesExt>(r: &mut R) -> Result<Self> {
         let len: u16 = Decodable::decode(r)?;
         String::from_utf8(read_exact(r, len as usize)?)
-            .or(res!(io_err!(Other, "Invalid UTF-8 sequence")))
+            .map_err(|_| io_err!(Other, "Invalid UTF-8 sequence"))
     }
 }
 
@@ -1003,11 +1003,8 @@ fn decoder_test1() {
     let expected: Vec<u8> = (0..10).collect();
     let mut decoder = Cursor::new(expected.clone());
     let mut actual: Vec<u8> = Vec::new();
-    loop {
-        match Decodable::decode(&mut decoder) {
-            Ok(i) => actual.push(i),
-            Err(_) => break,
-        }
+    while let Ok(i) = Decodable::decode(&mut decoder) {
+        actual.push(i)
     }
     assert_eq!(expected, actual);
 }

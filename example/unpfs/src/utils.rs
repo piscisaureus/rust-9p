@@ -1,6 +1,6 @@
 use {
     rs9p::fcall::*,
-    std::{fs::Metadata, os::unix::prelude::*, path::Path},
+    std::{fs::Metadata, io, os::unix::prelude::*, path::Path},
     tokio::fs,
 };
 
@@ -18,11 +18,8 @@ macro_rules! io_err {
     };
 }
 
-#[macro_export]
-macro_rules! INVALID_FID {
-    () => {
-        io_err!(InvalidInput, "Invalid fid")
-    };
+pub fn invalid_fid() -> io::Error {
+    io_err!(InvalidInput, "Invalid fid")
 }
 
 pub fn create_buffer(size: usize) -> Vec<u8> {
@@ -51,7 +48,7 @@ pub async fn get_dirent_from<P: AsRef<Path> + ?Sized>(
 ) -> rs9p::Result<DirEntry> {
     Ok(DirEntry {
         qid: get_qid(p).await?,
-        offset: offset,
+        offset,
         typ: 0,
         name: p.as_ref().to_string_lossy().into_owned(),
     })
@@ -60,7 +57,7 @@ pub async fn get_dirent_from<P: AsRef<Path> + ?Sized>(
 pub async fn get_dirent(entry: &fs::DirEntry, offset: u64) -> rs9p::Result<DirEntry> {
     Ok(DirEntry {
         qid: qid_from_attr(&entry.metadata().await?),
-        offset: offset,
+        offset,
         typ: 0,
         name: entry.file_name().to_string_lossy().into_owned(),
     })

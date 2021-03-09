@@ -1,3 +1,5 @@
+mod utils;
+
 use {
     async_trait::async_trait,
     filetime::FileTime,
@@ -9,19 +11,19 @@ use {
     },
     std::{
         ffi::OsString,
+        io,
         io::SeekFrom,
         os::unix::{fs::PermissionsExt, io::FromRawFd},
         path::PathBuf,
     },
     tokio::{
         fs::{self, read_dir, symlink_metadata},
-        prelude::*,
+        io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
         sync::{Mutex, RwLock},
     },
+    tokio_stream::wrappers::ReadDirStream,
+    utils::*,
 };
-
-mod utils;
-use utils::*;
 
 // Some clients will incorrectly set bits in 9p flags that don't make sense.
 // For exmaple, the linux 9p kernel client propagates O_DIRECT to TCREATE and TOPEN
@@ -105,7 +107,7 @@ impl Filesystem for Unpfs {
             *new_realpath = path;
         }
 
-        Ok(Fcall::Rwalk { wqids: wqids })
+        Ok(Fcall::Rwalk { wqids })
     }
 
     async fn rgetattr(&self, fid: &Fid<Self::Fid>, req_mask: GetattrMask) -> Result<Fcall> {
@@ -202,7 +204,7 @@ impl Filesystem for Unpfs {
             if !(dir_data.push(get_dirent_from(".", 0).await?).is_ok()
                 && dir_data.push(get_dirent_from("..", 1).await?).is_ok())
             {
-                Err(io_err!(Other, "Rreaddir buffer too small"))?;
+                return Err(io_err!(Other, "Rreaddir buffer too small").into());
             }
             off
         } else {
@@ -211,13 +213,14 @@ impl Filesystem for Unpfs {
 
         let mut entries = {
             let realpath = fid.aux.realpath.read().await;
-            fs::read_dir(&*realpath).await?.skip(offset as usize)
+            let read_dir = fs::read_dir(&*realpath).await?;
+            ReadDirStream::new(read_dir).skip(offset as usize)
         };
 
         let mut i = offset;
         while let Some(entry) = entries.next().await {
             let dirent = get_dirent(&entry?, 2 + i).await?;
-            if let Err(()) = dir_data.push(dirent) {
+            if let Err(DirDataFull) = dir_data.push(dirent) {
                 break;
             }
             i += 1;
@@ -235,19 +238,26 @@ impl Filesystem for Unpfs {
         // Iterating over `1..=2` to obtain `[".", ".."]` may seem odd, but
         // there seems to be no way to placate the borrow checker while
         // iterating over a slice of `&'static str`.
-        let entries1 = iter(1..=2).then(|num_dots| {
-            let name = OsString::from(".".repeat(num_dots));
-            let path = path.join(&name);
-            async move {
-                let metadata = symlink_metadata(path).await?;
-                Ok::<_, io::Error>((name, metadata))
-            }
-        });
-        let entries2 = read_dir(&*path).await?.and_then(|e| async move {
-            let name = e.file_name().to_owned();
-            let metadata = e.metadata().await?;
-            Ok((name, metadata))
-        });
+        let entries1 = iter(1..=2)
+            .then(|num_dots| {
+                let name = OsString::from(".".repeat(num_dots));
+                let path = path.join(&name);
+                async move {
+                    let metadata = symlink_metadata(path).await?;
+                    Ok::<_, io::Error>((name, metadata))
+                }
+            })
+            .boxed();
+        let entries2 = read_dir(&*path)
+            .map_ok(ReadDirStream::new)
+            .err_into::<Error>()
+            .await?
+            .and_then(|e| async move {
+                let name = e.file_name().to_owned();
+                let metadata = e.metadata().await?;
+                Ok((name, metadata))
+            })
+            .boxed();
         let entries = entries1
             .chain(entries2)
             .enumerate()
@@ -266,12 +276,12 @@ impl Filesystem for Unpfs {
                 })
             })
             .skip(offset as _)
-            .buffered(16);
+            .buffered(8);
         pin_mut!(entries);
 
         let mut dir_data = DirData::<DirEntryStat>::new(count);
         while let Some(r) = entries.next().await {
-            if let Err(()) = dir_data.push(r?) {
+            if let Err(DirDataFull) = dir_data.push(r?) {
                 break;
             }
         }
@@ -299,10 +309,7 @@ impl Filesystem for Unpfs {
             }
         }
 
-        Ok(Fcall::Rlopen {
-            qid: qid,
-            iounit: 0,
-        })
+        Ok(Fcall::Rlopen { qid, iounit: 0 })
     }
 
     async fn rlcreate(
@@ -339,7 +346,7 @@ impl Filesystem for Unpfs {
     async fn rread(&self, fid: &Fid<Self::Fid>, offset: u64, count: u32) -> Result<Fcall> {
         let buf = {
             let mut file = fid.aux.file.lock().await;
-            let file = file.as_mut().ok_or(INVALID_FID!())?;
+            let file = file.as_mut().ok_or_else(invalid_fid)?;
             file.seek(SeekFrom::Start(offset)).await?;
 
             let mut buf = create_buffer(count as usize);
@@ -354,7 +361,7 @@ impl Filesystem for Unpfs {
     async fn rwrite(&self, fid: &Fid<Self::Fid>, offset: u64, data: &Data) -> Result<Fcall> {
         let count = {
             let mut file = fid.aux.file.lock().await;
-            let file = file.as_mut().ok_or(INVALID_FID!())?;
+            let file = file.as_mut().ok_or_else(invalid_fid)?;
             file.seek(SeekFrom::Start(offset)).await?;
             file.write(&data.0).await? as u32
         };
@@ -449,7 +456,7 @@ impl Filesystem for Unpfs {
     async fn rfsync(&self, fid: &Fid<Self::Fid>) -> Result<Fcall> {
         {
             let mut file = fid.aux.file.lock().await;
-            file.as_mut().ok_or(INVALID_FID!())?.sync_all().await?;
+            file.as_mut().ok_or_else(invalid_fid)?.sync_all().await?;
         }
 
         Ok(Fcall::Rfsync)
@@ -469,7 +476,7 @@ impl Filesystem for Unpfs {
                 let _ = fid.aux.realpath.write().await;
                 Ok(Fcall::Rclose)
             }
-            _ => Err(io_err!(InvalidInput, "Invalid close flags"))?,
+            _ => return Err(io_err!(InvalidInput, "Invalid close flags").into()),
         }
     }
 
@@ -494,7 +501,7 @@ impl Filesystem for Unpfs {
     }
 }
 
-async fn unpfs_main(args: Vec<String>) -> rs9p::Result<i32> {
+async fn unpfs_main(args: Vec<String>) -> Result<i32> {
     if args.len() < 3 {
         eprintln!("Usage: {} proto!address!port mountpoint", args[0]);
         eprintln!("  where: proto = tcp | unix");
@@ -517,7 +524,7 @@ async fn unpfs_main(args: Vec<String>) -> rs9p::Result<i32> {
     .and(Ok(0))
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::init();
 

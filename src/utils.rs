@@ -8,15 +8,9 @@ macro_rules! io_err {
     };
 }
 
-macro_rules! res {
-    ($err:expr) => {
-        Err(From::from($err))
-    };
-}
-
 pub fn parse_proto(arg: &str) -> Option<(&str, String)> {
     let mut split = arg.split('!');
-    let (proto, addr, port) = (split.nth(0)?, split.nth(0)?, split.nth(0)?);
+    let (proto, addr, port) = (split.next()?, split.next()?, split.next()?);
 
     Some((proto, addr.to_owned() + ":" + port))
 }

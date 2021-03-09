@@ -1,0 +1,12 @@
+{
+  "folders": [
+    {
+      "name": "rust-9p",
+      "path": "."
+    },
+    {
+      "name": "unpfs",
+      "path": "example/unpfs"
+    }
+  ]
+}

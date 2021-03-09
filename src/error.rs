@@ -30,7 +30,8 @@ fn errno_from_io_error(e: &io::Error) -> nix::errno::Errno {
             TimedOut => ETIMEDOUT,
             WriteZero => EAGAIN,
             Interrupted => EINTR,
-            Other | _ => EIO,
+            Other => EIO,
+            _ => EIO,
         })
 }
 
