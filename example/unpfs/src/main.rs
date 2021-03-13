@@ -462,19 +462,13 @@ impl Filesystem for Unpfs {
         Ok(Fcall::Rfsync)
     }
 
-    async fn rclose(&self, fid: &Fid<Self::Fid>, flags: u32) -> Result<Fcall> {
+    async fn raccess(&self, fid: &Fid<Self::Fid>, flags: u32) -> Result<Fcall> {
         // I have no idea what possible `flags` are; this parameter seems to
         // always have the samve value (8).
         match flags {
             8 => {
-                if let Some(mut file) = fid.aux.file.lock().await.take() {
-                    file.flush().await?;
-                }
-                // TODO: ensure that the path is no longer in use by other
-                // operations. The `realpath` field fets cloned here and there,
-                // so just locking it probably doesn't do the trick.
                 let _ = fid.aux.realpath.write().await;
-                Ok(Fcall::Rclose)
+                Ok(Fcall::Raccess)
             }
             _ => return Err(io_err!(InvalidInput, "Invalid close flags").into()),
         }

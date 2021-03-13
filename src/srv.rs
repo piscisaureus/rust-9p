@@ -259,7 +259,7 @@ pub trait Filesystem: Send {
     /*
      * 9P2000.W
      */
-    async fn rclose(&self, _: &Fid<Self::Fid>, _flags: u32) -> Result<Fcall> {
+    async fn raccess(&self, _: &Fid<Self::Fid>, _flags: u32) -> Result<Fcall> {
         Err(error::Error::No(EOPNOTSUPP))
     }
 
@@ -318,7 +318,7 @@ where
             Twrite { fid, ref offset, ref data }                                => fs.rwrite(get_fid(&fid)?, *offset, data),
             Tclunk { fid }                                                      => fs.rclunk(get_fid(&fid)?),
             Tremove { fid }                                                     => fs.rremove(get_fid(&fid)?),
-            Tclose { fid, ref flags }                                           => fs.rclose(get_fid(&fid)?, *flags),
+            Taccess { fid, ref flags }                                          => fs.raccess(get_fid(&fid)?, *flags),
             Treaddirstat{fid, ref offset, ref count}                            => fs.rreaddirstat(get_fid(&fid)?, *offset, *count),
             _                                                                   => return Err(error::Error::No(EOPNOTSUPP)),
         };

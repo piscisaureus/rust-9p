@@ -533,8 +533,8 @@ impl Encodable for Msg {
             /*
              * 9P2000.W
              */
-            Tclose { ref fid, ref flags } => buf << fid << flags,
-            Rclose => buf,
+            Taccess { ref fid, ref flags } => buf << fid << flags,
+            Raccess => buf,
             Treaddirstat {
                 ref fid,
                 ref offset,
@@ -941,11 +941,11 @@ impl Decodable for Msg {
             Some(Rremove) => Fcall::Rremove,
 
             // 9P2000.W
-            Some(Tclose) => Fcall::Tclose {
+            Some(Taccess) => Fcall::Taccess {
                 fid: decode!(buf),
                 flags: decode!(buf),
             },
-            Some(Rclose) => Fcall::Rclose,
+            Some(Raccess) => Fcall::Raccess,
             Some(Treaddirstat) => Fcall::Treaddirstat {
                 fid: decode!(buf),
                 offset: decode!(buf),

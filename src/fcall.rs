@@ -595,8 +595,8 @@ enum_from_primitive! {
         //Rwstat,
 
         // 9P2000.W
-        Tclose          = 128,
-        Rclose,
+        Taccess         = 128,
+        Raccess,
         Treaddirstat    = 130,
         Rreaddirstat
     }
@@ -643,7 +643,7 @@ impl MsgType {
                 | Rclunk
                 | Rremove
                 | Rreaddirstat
-                | Rclose
+                | Raccess
         )
     }
 }
@@ -708,8 +708,8 @@ impl<'a> From<&'a Fcall> for MsgType {
             Fcall::Rclunk => MsgType::Rclunk,
             Fcall::Tremove { .. } => MsgType::Tremove,
             Fcall::Rremove => MsgType::Rremove,
-            Fcall::Tclose { .. } => MsgType::Tclose,
-            Fcall::Rclose { .. } => MsgType::Rclose,
+            Fcall::Taccess { .. } => MsgType::Taccess,
+            Fcall::Raccess { .. } => MsgType::Raccess,
             Fcall::Treaddirstat { .. } => MsgType::Treaddirstat,
             Fcall::Rreaddirstat { .. } => MsgType::Rreaddirstat,
         }
@@ -949,11 +949,11 @@ pub enum Fcall {
     //Rwstat,
 
     // 9P2000.W
-    Tclose {
+    Taccess {
         fid: u32,
         flags: u32,
     },
-    Rclose,
+    Raccess,
     Treaddirstat {
         fid: u32,
         offset: u64,
@@ -998,7 +998,7 @@ impl Fcall {
             Fcall::Tclunk { fid, .. } => vec![fid],
             Fcall::Tremove { fid } => vec![fid],
             Fcall::Treaddirstat { fid, .. } => vec![fid],
-            Fcall::Tclose { fid, .. } => vec![fid],
+            Fcall::Taccess { fid, .. } => vec![fid],
             _ => Vec::new(),
         }
     }
